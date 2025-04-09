@@ -7,19 +7,51 @@ const T1_RPC = 'https://rpc.v006.t1protocol.com';
 const SEPOLIA_CHAIN_ID = 11155111;
 const T1_CHAIN_ID = 299792;
 
-
-const minAmount = 0.0002
-const maxAmount = 0.01
-
-const RECEIVER_ADDRESS = 'YOUR RECEIVER';
-
-const CONFIG = {
-  PRIVATE_KEY: "YOUR PK",
-  DELAY_SECONDS: 5   // Delay between bridge operations
-};
+const minAmount = 0.0002;
+const maxAmount = 0.01;
+const MAX_BRIDGES_PER_DAY = 5;
+const MIN_DELAY_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_DELAY_MS = 60 * 60 * 1000; // 1 hour
+const CYCLE_DELAY_MS = 20 * 60 * 1000; // 20 minutes
 
 const SEPOLIA_TO_T1_BRIDGE = '0xAFdF5cb097D6FB2EB8B1FFbAB180e667458e18F4';
 const T1_TO_SEPOLIA_BRIDGE = '0x627B3692969b7330b8Faed2A8836A41EB4aC1918';
+
+// Load accounts from file
+function loadAccounts() {
+  try {
+    const data = fs.readFileSync('accounts.txt', 'utf8');
+    const accounts = [];
+    
+    data.split('\n').forEach(line => {
+      line = line.trim();
+      if (!line || line.startsWith('#')) return;
+      
+      const [address, privateKey] = line.split(',');
+      if (address && privateKey) {
+        // Verify address matches private key
+        const wallet = new ethers.Wallet(privateKey.trim());
+        if (wallet.address.toLowerCase() !== address.trim().toLowerCase()) {
+          console.warn(`Warning: Address ${address} doesn't match private key`);
+        }
+        
+        accounts.push({
+          ADDRESS: wallet.address, // Use derived address
+          PRIVATE_KEY: privateKey.trim(),
+          bridgeCount: 0,
+          lastReset: null
+        });
+      }
+    });
+    
+    return accounts;
+  } catch (error) {
+    console.error(`Error reading accounts.txt: ${error.message}`);
+    return [];
+  }
+}
+
+const ACCOUNTS = loadAccounts();
 
 // Stats tracking
 let stats = {
@@ -28,7 +60,6 @@ let stats = {
   startTime: new Date()
 };
 
-// Create log file stream
 const logStream = fs.createWriteStream('bridge_log.txt', { flags: 'a' });
 
 // Enhanced logging function
@@ -39,339 +70,197 @@ function log(message, type = 'info') {
                          type === 'warning' ? `\x1b[33m${message}\x1b[0m` :
                          type === 'highlight' ? `\x1b[36m${message}\x1b[0m` :
                          message;
-  
-  // Console output with color
   console.log(`[${timestamp}] ${coloredMessage}`);
-  
-  // File output without color codes
   logStream.write(`[${timestamp}] ${message}\n`);
 }
 
-// Function to get account balance
+// Utility functions
 async function getBalance(provider, address) {
   const balance = await provider.getBalance(address);
   return ethers.utils.formatEther(balance);
 }
 
-// Display stats function
+function getRandomAmount(min = minAmount, max = maxAmount) {
+  return parseFloat((Math.random() * (max - min) + min).toFixed(6));
+}
+
+function getRandomDelay(min = MIN_DELAY_MS, max = MAX_DELAY_MS) {
+  return Math.floor(Math.random() * (max - min + 1) + min);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 function displayStats() {
   const duration = Math.floor((new Date() - stats.startTime) / 1000);
   const hours = Math.floor(duration / 3600);
   const minutes = Math.floor((duration % 3600) / 60);
   const seconds = duration % 60;
-  const timeRunning = `${hours}h ${minutes}m ${seconds}s`;
-  
-  log('='.repeat(20), 'highlight');
-  log(`🔄 BRIDGE BOT STATISTICS - Running for ${timeRunning}`, 'highlight');
-  log('='.repeat(20), 'highlight');
-  log(`Sepolia → T1: ${stats.sepoliaToT1.successes}/${stats.sepoliaToT1.attempts} successful (${stats.sepoliaToT1.failures} failed)`, stats.sepoliaToT1.failures > 0 ? 'warning' : 'info');
-  log(`T1 → Sepolia: ${stats.t1ToSepolia.successes}/${stats.t1ToSepolia.attempts} successful (${stats.t1ToSepolia.failures} failed)`, stats.t1ToSepolia.failures > 0 ? 'warning' : 'info');
-  log(`Total ETH bridged: ${stats.sepoliaToT1.totalBridged.toFixed(4)} (Sepolia→T1), ${stats.t1ToSepolia.totalBridged.toFixed(4)} (T1→Sepolia)`, 'info');
-  log('='.repeat(20), 'highlight');
+  log(`🔄 BRIDGE BOT STATISTICS - Running for ${hours}h ${minutes}m ${seconds}s`, 'highlight');
+  log(`Sepolia → T1: ${stats.sepoliaToT1.successes}/${stats.sepoliaToT1.attempts}`, 'info');
+  log(`T1 → Sepolia: ${stats.t1ToSepolia.successes}/${stats.t1ToSepolia.attempts}`, 'info');
+  log(`Total ETH bridged: ${stats.sepoliaToT1.totalBridged.toFixed(4)}`, 'info');
 }
 
-// Bridge from Sepolia to T1Protocol
-async function bridgeSepoliaToT1(privateKey, amountETH) {
-  stats.sepoliaToT1.attempts++;
-  const attemptNum = stats.sepoliaToT1.attempts;
-  
-  try {
-    log(`🚀 [Attempt #${attemptNum}] Bridging ${amountETH} ETH from Sepolia to T1Protocol...`, 'highlight');
-    
-    // Connect to Sepolia network
-    const sepoliaProvider = new ethers.providers.JsonRpcProvider(SEPOLIA_RPC);
-    const wallet = new ethers.Wallet(privateKey, sepoliaProvider);
-    
-    // Get and log current balance
-    const startBalance = await getBalance(sepoliaProvider, wallet.address);
-    log(`💰 Current Sepolia balance: ${startBalance} ETH`);
-    
-    // Convert amount to Wei
-    const amountWei = ethers.utils.parseEther(amountETH.toString());
-    
-    // Keep the _value and tx.value exactly the same
-    const txValueWei = amountWei.add(ethers.utils.parseEther("0.0001"));
-
-    
-    // Create the ABI interface for the bridge contract
-    const bridgeInterface = new ethers.utils.Interface([
-      "function sendMessage(address _to, uint256 _value, bytes _message, uint256 _gasLimit, uint64 _destChainId, address _callbackAddress)"
-    ]);
-    
-  // Encode the function call
-  const txData = bridgeInterface.encodeFunctionData("sendMessage", [
-    RECEIVER_ADDRESS,
-    amountWei,  // Amount to bridge
-    "0x",       // Empty message
-    168000,     // Gas limit as per example
-    T1_CHAIN_ID,// T1 chain ID
-    RECEIVER_ADDRESS // Callback address
-  ]);
-    
-    log(`📤 Preparing transaction with: Amount=${ethers.utils.formatEther(amountWei)} ETH`);
-    
-    // Set gas prices
-    const feeData = await sepoliaProvider.getFeeData();
-    const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas || ethers.utils.parseUnits('3.5', 'gwei');
-    const maxFeePerGas = feeData.maxFeePerGas || ethers.utils.parseUnits('4', 'gwei');
-    
-    // Send transaction
-    log(`🔧 Using gas: Max fee=${ethers.utils.formatUnits(maxFeePerGas, 'gwei')} gwei, Priority=${ethers.utils.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei`);
-    
-      // Send transaction
-      const tx = await wallet.sendTransaction({
-        to: SEPOLIA_TO_T1_BRIDGE,
-        value: txValueWei,  // Send slightly more than the bridge amount
-        data: txData,
-        gasLimit: 300000,
-        maxFeePerGas: maxFeePerGas,
-        maxPriorityFeePerGas: maxPriorityFeePerGas,
-        type: 2 // EIP-1559 transaction
-      });
-    
-    log(`📤 Transaction sent: ${tx.hash}`);
-    log(`🔍 Check status: https://sepolia.etherscan.io/tx/${tx.hash}`);
-    log(`⏳ Waiting for confirmation...`);
-    
-    // Wait for confirmation with timeout
-    try {
-      const receipt = await Promise.race([
-        tx.wait(1),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Transaction confirmation timeout")), 120000))
-      ]);
-      
-      if (receipt.status === 1) {
-        stats.sepoliaToT1.successes++;
-        stats.sepoliaToT1.totalBridged += parseFloat(amountETH);
-        
-        const endBalance = await getBalance(sepoliaProvider, wallet.address);
-        const gasCost = parseFloat(startBalance) - parseFloat(endBalance) - parseFloat(amountETH);
-        
-        log(`✅ Transaction confirmed in block ${receipt.blockNumber}!`, 'success');
-        log(`💸 Gas cost: ${gasCost.toFixed(6)} ETH`);
-        log(`📊 New Sepolia balance: ${endBalance} ETH`);
-        displayStats();
-      } else {
-        stats.sepoliaToT1.failures++;
-        log(`❌ Transaction failed. Status code: ${receipt.status}`, 'error');
-        displayStats();
-      }
-    } catch (waitError) {
-      stats.sepoliaToT1.failures++;
-      log(`⚠️ Error waiting for transaction: ${waitError.message}`, 'error');
-      log(`🔍 Please check the transaction status manually.`);
-      displayStats();
-    }
-    
-    return amountETH;
-  } catch (error) {
-    stats.sepoliaToT1.failures++;
-    log(`❌ Error bridging from Sepolia to T1:`, 'error');
-    log(error.message, 'error');
-    
-    if (error.transaction) {
-      log('Failed transaction details:', 'error');
-      log(`Hash: ${error.transactionHash}`, 'error');
-      log(`To: ${error.transaction.to}`, 'error');
-      log(`Value: ${ethers.utils.formatEther(error.transaction.value)} ETH`, 'error');
-      log(`Gas Limit: ${error.transaction.gasLimit.toString()}`, 'error');
-    }
-    displayStats();
-    throw error;
+// Check and reset daily bridge count
+function checkAndResetBridgeCount(account) {
+  const now = new Date();
+  if (!account.lastReset || (now - account.lastReset) >= 24 * 60 * 60 * 1000) {
+    account.bridgeCount = 0;
+    account.lastReset = now;
   }
+  return account.bridgeCount < MAX_BRIDGES_PER_DAY;
 }
 
-// Bridge from T1Protocol back to Sepolia
-async function bridgeT1ToSepolia(privateKey, amountETH) {
-  stats.t1ToSepolia.attempts++;
-  const attemptNum = stats.t1ToSepolia.attempts;
-  
+// Bridge functions
+async function bridgeSepoliaToT1(account, amountETH) {
+  stats.sepoliaToT1.attempts++;
   try {
-    log(`🚀 [Attempt #${attemptNum}] Bridging ${amountETH} ETH from T1Protocol to Sepolia...`, 'highlight');
+    const sepoliaProvider = new ethers.providers.JsonRpcProvider(SEPOLIA_RPC);
+    const wallet = new ethers.Wallet(account.PRIVATE_KEY, sepoliaProvider);
     
-    // Connect to T1 network
-    const t1Provider = new ethers.providers.JsonRpcProvider(T1_RPC);
-    const wallet = new ethers.Wallet(privateKey, t1Provider);
-    
-    // Get and log current balance
-    const startBalance = await getBalance(t1Provider, wallet.address);
-    log(`💰 Current T1 balance: ${startBalance} ETH`);
-    
-    // Convert amount to Wei
     const amountWei = ethers.utils.parseEther(amountETH.toString());
+    const txValueWei = amountWei.add(ethers.utils.parseEther("0.0001"));
     
-    // Create the ABI interface for the bridge contract
     const bridgeInterface = new ethers.utils.Interface([
       "function sendMessage(address _to, uint256 _value, bytes _message, uint256 _gasLimit, uint64 _destChainId, address _callbackAddress)"
     ]);
     
-    // Encode the function call for T1 to Sepolia
     const txData = bridgeInterface.encodeFunctionData("sendMessage", [
-      RECEIVER_ADDRESS,
-      amountWei,        // Amount to bridge
-      "0x",             // Empty message
-      0,                // Gas limit (0 for T1 to Sepolia)
-      SEPOLIA_CHAIN_ID, // Sepolia chain ID
-      RECEIVER_ADDRESS  // Callback address
+      account.ADDRESS, // Use account's own address as receiver
+      amountWei,
+      "0x",
+      168000,
+      T1_CHAIN_ID,
+      account.ADDRESS
     ]);
     
-    log(`📤 Preparing transaction with: Amount=${ethers.utils.formatEther(amountWei)} ETH`);
-    
-    // Get latest gas price
-    const gasPrice = await t1Provider.getGasPrice();
-    log(`🔧 Using gas price: ${ethers.utils.formatUnits(gasPrice, 'gwei')} gwei`);
-    
-    // Send transaction
     const tx = await wallet.sendTransaction({
-      to: T1_TO_SEPOLIA_BRIDGE,
-      value: amountWei,  // Same as parameter value - no extra fee needed
+      to: SEPOLIA_TO_T1_BRIDGE,
+      value: txValueWei,
       data: txData,
       gasLimit: 300000,
-      gasPrice: gasPrice
+      type: 2
     });
     
-    log(`📤 Transaction sent: ${tx.hash}`);
-    log(`⏳ Waiting for confirmation...`);
-    
-    // Wait for confirmation with timeout
-    try {
-      const receipt = await Promise.race([
-        tx.wait(1),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Transaction confirmation timeout")), 120000))
-      ]);
-      
-      if (receipt.status === 1) {
-        stats.t1ToSepolia.successes++;
-        stats.t1ToSepolia.totalBridged += parseFloat(amountETH);
-        
-        const endBalance = await getBalance(t1Provider, wallet.address);
-        const gasCost = parseFloat(startBalance) - parseFloat(endBalance) - parseFloat(amountETH);
-        
-        log(`✅ Transaction confirmed in block ${receipt.blockNumber}!`, 'success');
-        log(`💸 Gas cost: ${gasCost.toFixed(6)} ETH`);
-        log(`📊 New T1 balance: ${endBalance} ETH`);
-        displayStats();
-      } else {
-        stats.t1ToSepolia.failures++;
-        log(`❌ Transaction failed. Status code: ${receipt.status}`, 'error');
-        displayStats();
-      }
-    } catch (waitError) {
-      stats.t1ToSepolia.failures++;
-      log(`⚠️ Error waiting for transaction: ${waitError.message}`, 'error');
-      log(`🔍 Please check the transaction status manually.`);
-      displayStats();
+    const receipt = await tx.wait(1);
+    if (receipt.status === 1) {
+      stats.sepoliaToT1.successes++;
+      stats.sepoliaToT1.totalBridged += parseFloat(amountETH);
+      log(`✅ Sepolia→T1 Success: ${tx.hash}`, 'success');
+      return true;
     }
+    return false;
+  } catch (error) {
+    stats.sepoliaToT1.failures++;
+    log(`❌ Sepolia→T1 Error: ${error.message}`, 'error');
+    return false;
+  }
+}
+
+async function bridgeT1ToSepolia(account, amountETH) {
+  stats.t1ToSepolia.attempts++;
+  try {
+    const t1Provider = new ethers.providers.JsonRpcProvider(T1_RPC);
+    const wallet = new ethers.Wallet(account.PRIVATE_KEY, t1Provider);
     
-    return amountETH;
+    const amountWei = ethers.utils.parseEther(amountETH.toString());
+    
+    const bridgeInterface = new ethers.utils.Interface([
+      "function sendMessage(address _to, uint256 _value, bytes _message, uint256 _gasLimit, uint64 _destChainId, address _callbackAddress)"
+    ]);
+    
+    const txData = bridgeInterface.encodeFunctionData("sendMessage", [
+      account.ADDRESS, // Use account's own address as receiver
+      amountWei,
+      "0x",
+      0,
+      SEPOLIA_CHAIN_ID,
+      account.ADDRESS
+    ]);
+    
+    const tx = await wallet.sendTransaction({
+      to: T1_TO_SEPOLIA_BRIDGE,
+      value: amountWei,
+      data: txData,
+      gasLimit: 300000
+    });
+    
+    const receipt = await tx.wait(1);
+    if (receipt.status === 1) {
+      stats.t1ToSepolia.successes++;
+      stats.t1ToSepolia.totalBridged += parseFloat(amountETH);
+      log(`✅ T1→Sepolia Success: ${tx.hash}`, 'success');
+      return true;
+    }
+    return false;
   } catch (error) {
     stats.t1ToSepolia.failures++;
-    log(`❌ Error bridging from T1 to Sepolia:`, 'error');
-    log(error.message, 'error');
-    
-    if (error.transaction) {
-      log('Failed transaction details:', 'error');
-      log(`Hash: ${error.transactionHash}`, 'error');
-      log(`To: ${error.transaction.to}`, 'error');
-      log(`Value: ${ethers.utils.formatEther(error.transaction.value)} ETH`, 'error');
-      log(`Gas Limit: ${error.transaction.gasLimit.toString()}`, 'error');
-    }
-    displayStats();
-    throw error;
+    log(`❌ T1→Sepolia Error: ${error.message}`, 'error');
+    return false;
   }
 }
 
-// Sleep function
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+// Main multi-account bridge loop
+async function multiAccountBridge() {
+  if (ACCOUNTS.length === 0) {
+    log('No accounts found in accounts.txt', 'error');
+    return;
+  }
+  
+  log(`🤖 Starting multi-account bridge bot with ${ACCOUNTS.length} accounts`, 'highlight');
+  
+  while (true) {
+    for (let account of ACCOUNTS) {
+      log(`🔄 Processing account: ${account.ADDRESS}`, 'highlight');
 
-// Infinite bridge loop
-async function infiniteBridge(privateKey, delaySeconds = 60) {
-    function getRandomAmount(min = minAmount, max = maxAmount) {
-      return parseFloat((Math.random() * (max - min) + min).toFixed(6));
-    }
-  
-    // Check if args are provided
-    if (!privateKey) {
-      log('No private key provided. Please set your private key.', 'error');
-      return;
-    }
-  
-    // Create wallet instances
-    const sepoliaProvider = new ethers.providers.JsonRpcProvider(SEPOLIA_RPC);
-    const t1Provider = new ethers.providers.JsonRpcProvider(T1_RPC);
-    const sepoliaWallet = new ethers.Wallet(privateKey, sepoliaProvider);
-    const t1Wallet = new ethers.Wallet(privateKey, t1Provider);
-  
-    log(`🤖 Starting infinite bridge bot for address: ${sepoliaWallet.address}`, 'highlight');
-    log(`  - Delay between cycles: ${delaySeconds} seconds`, 'info');
-    displayStats();
-  
-    // Start infinite loop
-    while (true) {
-      try {
-        // Get fresh random amounts for this cycle
-        const sepoliaAmount = getRandomAmount();
-        const t1Amount = getRandomAmount();
-  
-        log(`🔄 Bridge parameters:`, 'highlight');
-        log(`  - Sepolia → T1: ${sepoliaAmount} ETH`, 'info');
-        log(`  - T1 → Sepolia: ${t1Amount} ETH`, 'info');
-        log(`  - Minimum required balances: ${sepoliaAmount * 1.1} ETH (Sepolia), ${t1Amount * 1.1} ETH (T1)`, 'info');
-  
-        // Check balances
-        const sepoliaBalance = await getBalance(sepoliaProvider, sepoliaWallet.address);
-        const t1Balance = await getBalance(t1Provider, t1Wallet.address);
-  
-        log(`📊 Current balances: ${sepoliaBalance} ETH (Sepolia), ${t1Balance} ETH (T1)`);
-  
-        // Sepolia → T1 bridge
-        if (parseFloat(sepoliaBalance) >= sepoliaAmount * 1.1) {
-          await bridgeSepoliaToT1(privateKey, sepoliaAmount);
-        } else {
-          log(`⚠️ Insufficient funds on Sepolia (${sepoliaBalance} ETH). Skipping Sepolia→T1 bridge.`, 'warning');
-        }
-  
-        // Wait between bridges
-        log(`⏱️ Waiting ${delaySeconds} seconds before next bridge...`);
-        await sleep(delaySeconds * 1000);
-  
-        // T1 → Sepolia bridge
-        if (parseFloat(t1Balance) >= t1Amount * 1.1) {
-          await bridgeT1ToSepolia(privateKey, t1Amount);
-        } else {
-          log(`⚠️ Insufficient funds on T1 (${t1Balance} ETH). Skipping T1→Sepolia bridge.`, 'warning');
-        }
-  
-        // Wait before next cycle
-        log(`⏱️ Waiting ${delaySeconds} seconds before next cycle...`);
-        await sleep(delaySeconds * 1000);
-  
-      } catch (error) {
-        log(`🔴 Error in bridge cycle: ${error.message}`, 'error');
-        log(`⏱️ Waiting ${delaySeconds * 2} seconds before retrying...`, 'warning');
-        await sleep(delaySeconds * 2000);
+      if (!checkAndResetBridgeCount(account)) {
+        log(`⏳ Account ${account.ADDRESS} reached daily limit of ${MAX_BRIDGES_PER_DAY} bridges`, 'warning');
+        continue;
       }
+
+      for (let i = 0; i < MAX_BRIDGES_PER_DAY && account.bridgeCount < MAX_BRIDGES_PER_DAY; i++) {
+        const amount = getRandomAmount();
+        
+        const sepoliaSuccess = await bridgeSepoliaToT1(account, amount);
+        if (sepoliaSuccess) account.bridgeCount++;
+        
+        const delay1 = getRandomDelay();
+        log(`⏱️ Waiting ${delay1/60000} minutes before next transaction...`);
+        await sleep(delay1);
+
+        const t1Success = await bridgeT1ToSepolia(account, amount);
+        if (t1Success) account.bridgeCount++;
+
+        if (i < MAX_BRIDGES_PER_DAY - 1) {
+          const delay2 = getRandomDelay();
+          log(`⏱️ Waiting ${delay2/60000} minutes before next bridge...`);
+          await sleep(delay2);
+        }
+      }
+
+      log(`✅ Completed bridges for account ${account.ADDRESS}. Total today: ${account.bridgeCount}`, 'success');
     }
+
+    log(`⏱️ All accounts processed. Waiting ${CYCLE_DELAY_MS/60000} minutes before next cycle...`, 'highlight');
+    await sleep(CYCLE_DELAY_MS);
+    displayStats();
   }
-  
-
-
-
-// Start the infinite bridge if this file is run directly
-if (require.main === module) {
-  infiniteBridge(
-    CONFIG.PRIVATE_KEY,
-    CONFIG.DELAY_SECONDS
-  );
 }
 
-// Export functions for potential use in other scripts
+// Start the bridge
+if (require.main === module) {
+  multiAccountBridge().catch(error => {
+    log(`🔴 Fatal error: ${error.message}`, 'error');
+    process.exit(1);
+  });
+}
+
 module.exports = {
   bridgeSepoliaToT1,
   bridgeT1ToSepolia,
-  infiniteBridge,
+  multiAccountBridge,
   getBalance,
   stats
 };
