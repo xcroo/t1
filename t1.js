@@ -76,7 +76,7 @@ function log(message, type = 'info') {
 // Utility functions
 async function getBalance(provider, address) {
   const balance = await provider.getBalance(address);
-  return ethers.utils.formatEther(balance);
+  return ethers.formatEther(balance); // Update untuk v6
 }
 
 function getRandomAmount(min = minAmount, max = maxAmount) {
@@ -116,13 +116,13 @@ function checkAndResetBridgeCount(account) {
 async function bridgeSepoliaToT1(account, amountETH) {
   stats.sepoliaToT1.attempts++;
   try {
-    const sepoliaProvider = new ethers.providers.JsonRpcProvider(SEPOLIA_RPC);
+    const sepoliaProvider = new ethers.JsonRpcProvider(SEPOLIA_RPC);
     const wallet = new ethers.Wallet(account.PRIVATE_KEY, sepoliaProvider);
     
-    const amountWei = ethers.utils.parseEther(amountETH.toString());
-    const txValueWei = amountWei.add(ethers.utils.parseEther("0.0001"));
+    const amountWei = ethers.parseEther(amountETH.toString());
+    const txValueWei = amountWei + ethers.parseEther("0.0001"); // Update untuk v6
     
-    const bridgeInterface = new ethers.utils.Interface([
+    const bridgeInterface = new ethers.Interface([ // Update untuk v6
       "function sendMessage(address _to, uint256 _value, bytes _message, uint256 _gasLimit, uint64 _destChainId, address _callbackAddress)"
     ]);
     
@@ -161,12 +161,12 @@ async function bridgeSepoliaToT1(account, amountETH) {
 async function bridgeT1ToSepolia(account, amountETH) {
   stats.t1ToSepolia.attempts++;
   try {
-    const t1Provider = new ethers.providers.JsonRpcProvider(T1_RPC);
+    const t1Provider = new ethers.JsonRpcProvider(T1_RPC);
     const wallet = new ethers.Wallet(account.PRIVATE_KEY, t1Provider);
     
-    const amountWei = ethers.utils.parseEther(amountETH.toString());
+    const amountWei = ethers.parseEther(amountETH.toString());
     
-    const bridgeInterface = new ethers.utils.Interface([
+    const bridgeInterface = new ethers.Interface([ // Update untuk v6
       "function sendMessage(address _to, uint256 _value, bytes _message, uint256 _gasLimit, uint64 _destChainId, address _callbackAddress)"
     ]);
     
@@ -203,6 +203,9 @@ async function bridgeT1ToSepolia(account, amountETH) {
 
 // Main multi-account bridge loop
 async function multiAccountBridge() {
+  log('Debug: Script started', 'highlight');
+  log(`Debug: Found ${ACCOUNTS.length} accounts`, 'highlight');
+  
   if (ACCOUNTS.length === 0) {
     log('No accounts found in accounts.txt', 'error');
     return;
