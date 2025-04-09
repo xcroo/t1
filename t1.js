@@ -10,9 +10,9 @@ const T1_CHAIN_ID = 299792;
 const minAmount = 0.0002;
 const maxAmount = 0.01;
 const MAX_BRIDGES_PER_DAY = 5;
-const MIN_DELAY_MS = 30 * 60 * 1000; // 30 minutes
-const MAX_DELAY_MS = 60 * 60 * 1000; // 1 hour
-const CYCLE_DELAY_MS = 20 * 60 * 1000; // 20 minutes
+const MIN_DELAY_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_DELAY_MS = 25 * 60 * 1000; // 25 minutes
+const CYCLE_DELAY_MS = 20 * 60 * 60 * 1000; // 20 hours
 
 const SEPOLIA_TO_T1_BRIDGE = '0xAFdF5cb097D6FB2EB8B1FFbAB180e667458e18F4';
 const T1_TO_SEPOLIA_BRIDGE = '0x627B3692969b7330b8Faed2A8836A41EB4aC1918';
@@ -29,14 +29,13 @@ function loadAccounts() {
       
       const [address, privateKey] = line.split(',');
       if (address && privateKey) {
-        // Verify address matches private key
         const wallet = new ethers.Wallet(privateKey.trim());
         if (wallet.address.toLowerCase() !== address.trim().toLowerCase()) {
           console.warn(`Warning: Address ${address} doesn't match private key`);
         }
         
         accounts.push({
-          ADDRESS: wallet.address, // Use derived address
+          ADDRESS: wallet.address,
           PRIVATE_KEY: privateKey.trim(),
           bridgeCount: 0,
           lastReset: null
@@ -103,7 +102,7 @@ function displayStats() {
   log(`Total ETH bridged: ${stats.sepoliaToT1.totalBridged.toFixed(4)}`, 'info');
 }
 
-// Check and reset daily bridge count
+// Check and reset bridge count
 function checkAndResetBridgeCount(account) {
   const now = new Date();
   if (!account.lastReset || (now - account.lastReset) >= 24 * 60 * 60 * 1000) {
@@ -128,7 +127,7 @@ async function bridgeSepoliaToT1(account, amountETH) {
     ]);
     
     const txData = bridgeInterface.encodeFunctionData("sendMessage", [
-      account.ADDRESS, // Use account's own address as receiver
+      account.ADDRESS,
       amountWei,
       "0x",
       168000,
@@ -172,7 +171,7 @@ async function bridgeT1ToSepolia(account, amountETH) {
     ]);
     
     const txData = bridgeInterface.encodeFunctionData("sendMessage", [
-      account.ADDRESS, // Use account's own address as receiver
+      account.ADDRESS,
       amountWei,
       "0x",
       0,
@@ -223,6 +222,7 @@ async function multiAccountBridge() {
       for (let i = 0; i < MAX_BRIDGES_PER_DAY && account.bridgeCount < MAX_BRIDGES_PER_DAY; i++) {
         const amount = getRandomAmount();
         
+        // Sepolia to T1
         const sepoliaSuccess = await bridgeSepoliaToT1(account, amount);
         if (sepoliaSuccess) account.bridgeCount++;
         
@@ -230,10 +230,11 @@ async function multiAccountBridge() {
         log(`⏱️ Waiting ${delay1/60000} minutes before next transaction...`);
         await sleep(delay1);
 
+        // T1 to Sepolia
         const t1Success = await bridgeT1ToSepolia(account, amount);
         if (t1Success) account.bridgeCount++;
 
-        if (i < MAX_BRIDGES_PER_DAY - 1) {
+        if (i < MAX_BRIDGES_PER_DAY - 1 || account !== ACCOUNTS[ACCOUNTS.length - 1]) {
           const delay2 = getRandomDelay();
           log(`⏱️ Waiting ${delay2/60000} minutes before next bridge...`);
           await sleep(delay2);
@@ -243,7 +244,8 @@ async function multiAccountBridge() {
       log(`✅ Completed bridges for account ${account.ADDRESS}. Total today: ${account.bridgeCount}`, 'success');
     }
 
-    log(`⏱️ All accounts processed. Waiting ${CYCLE_DELAY_MS/60000} minutes before next cycle...`, 'highlight');
+    // Wait 20 hours before next cycle
+    log(`⏱️ All accounts processed. Waiting ${CYCLE_DELAY_MS/(60*60*1000)} hours before next cycle...`, 'highlight');
     await sleep(CYCLE_DELAY_MS);
     displayStats();
   }
